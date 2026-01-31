@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id as \"id!: Uuid\",\n                      name,\n                      default_agent_working_dir,\n                      remote_project_id as \"remote_project_id: Uuid\",\n                      working_directory,\n                      created_at as \"created_at!: DateTime<Utc>\",\n                      updated_at as \"updated_at!: DateTime<Utc>\"\n               FROM projects\n               WHERE id = $1",
+  "query": "SELECT id as \"id!: Uuid\",\n                      name,\n                      default_agent_working_dir,\n                      remote_project_id as \"remote_project_id: Uuid\",\n                      working_directory,\n                      auto_run as \"auto_run!: bool\",\n                      created_at as \"created_at!: DateTime<Utc>\",\n                      updated_at as \"updated_at!: DateTime<Utc>\"\n               FROM projects\n               WHERE remote_project_id = $1\n               LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -29,13 +29,18 @@
         "type_info": "Text"
       },
       {
-        "name": "created_at!: DateTime<Utc>",
+        "name": "auto_run!: bool",
         "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: DateTime<Utc>",
+        "ordinal": 6,
         "type_info": "Text"
       },
       {
         "name": "updated_at!: DateTime<Utc>",
-        "ordinal": 6,
+        "ordinal": 7,
         "type_info": "Text"
       }
     ],
@@ -49,8 +54,9 @@
       true,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "a042631e3879eca734b7005357716961d222efdbc53d9c110b2f3ef10656de33"
+  "hash": "dc954f1d69b4f70d679f43cbd8fce9c1954eff29f82a5ef320e62d9ed967475a"
 }

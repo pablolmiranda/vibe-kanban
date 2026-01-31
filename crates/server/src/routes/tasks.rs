@@ -14,12 +14,15 @@ use axum::{
 };
 use db::models::{
     image::TaskImage,
+    project::Project,
+    project_repo::ProjectRepo,
     repo::{Repo, RepoError},
-    task::{CreateTask, Task, TaskWithAttemptStatus, UpdateTask},
+    task::{CreateTask, Task, TaskStatus, TaskWithAttemptStatus, UpdateTask},
     workspace::{CreateWorkspace, Workspace},
     workspace_repo::{CreateWorkspaceRepo, WorkspaceRepo},
 };
 use deployment::Deployment;
+use executors::executors::BaseCodingAgent;
 use executors::profile::ExecutorProfileId;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -273,9 +276,11 @@ pub async fn create_task_and_start(
 pub async fn update_task(
     Extension(existing_task): Extension<Task>,
     State(deployment): State<DeploymentImpl>,
-
     Json(payload): Json<UpdateTask>,
 ) -> Result<ResponseJson<ApiResponse<Task>>, ApiError> {
+    let pool = &deployment.db().pool;
+    let old_status = existing_task.status.clone();
+
     // Use existing values if not provided in update
     let title = payload.title.unwrap_or(existing_task.title);
     let description = match payload.description {
@@ -283,13 +288,13 @@ pub async fn update_task(
         Some(s) => Some(s),                     // Non-empty string = update description
         None => existing_task.description,      // Field omitted = keep existing
     };
-    let status = payload.status.unwrap_or(existing_task.status);
+    let status = payload.status.unwrap_or(old_status.clone());
     let parent_workspace_id = payload
         .parent_workspace_id
         .or(existing_task.parent_workspace_id);
 
     let task = Task::update(
-        &deployment.db().pool,
+        pool,
         existing_task.id,
         existing_task.project_id,
         title,
@@ -300,11 +305,174 @@ pub async fn update_task(
     .await?;
 
     if let Some(image_ids) = &payload.image_ids {
-        TaskImage::delete_by_task_id(&deployment.db().pool, task.id).await?;
-        TaskImage::associate_many_dedup(&deployment.db().pool, task.id, image_ids).await?;
+        TaskImage::delete_by_task_id(pool, task.id).await?;
+        TaskImage::associate_many_dedup(pool, task.id, image_ids).await?;
+    }
+
+    // Auto-run: when task transitions to InProgress, check if project has auto_run enabled
+    let transitioned_to_in_progress =
+        old_status != TaskStatus::InProgress && task.status == TaskStatus::InProgress;
+
+    if transitioned_to_in_progress {
+        if let Err(e) = try_auto_run_attempt(&deployment, &task).await {
+            tracing::warn!("Auto-run attempt creation failed for task {}: {}", task.id, e);
+        }
     }
 
     Ok(ResponseJson(ApiResponse::success(task)))
+}
+
+/// Attempt to auto-create and start a workspace when a task moves to InProgress,
+/// if the project has auto_run enabled.
+async fn try_auto_run_attempt(
+    deployment: &DeploymentImpl,
+    task: &Task,
+) -> Result<(), ApiError> {
+    let pool = &deployment.db().pool;
+
+    let project = Project::find_by_id(pool, task.project_id)
+        .await?
+        .ok_or(ApiError::Database(SqlxError::RowNotFound))?;
+
+    if !project.auto_run {
+        return Ok(());
+    }
+
+    // Check if task already has a non-archived workspace (avoid duplicates)
+    let existing_workspaces = Workspace::fetch_all(pool, Some(task.id))
+        .await
+        .map_err(ApiError::Workspace)?;
+    let has_active_workspace = existing_workspaces.iter().any(|w| !w.archived);
+    if has_active_workspace {
+        tracing::debug!(
+            "Task {} already has an active workspace, skipping auto-run",
+            task.id
+        );
+        return Ok(());
+    }
+
+    let repos = ProjectRepo::find_repos_for_project(pool, task.project_id).await?;
+    let is_directory_only = repos.is_empty() && project.working_directory.is_some();
+
+    // For non-directory-only projects without repos, we can't auto-create
+    if repos.is_empty() && !is_directory_only {
+        tracing::debug!(
+            "Project {} has no repos and is not directory-only, skipping auto-run",
+            project.id
+        );
+        return Ok(());
+    }
+
+    // Determine executor: use the last executor used on this project, or default to ClaudeCode
+    let executor_profile_id = resolve_auto_run_executor(pool, task.project_id).await;
+
+    let attempt_id = Uuid::new_v4();
+
+    // Generate git branch (directory-only projects get empty branch)
+    let git_branch_name = if is_directory_only {
+        String::new()
+    } else {
+        deployment
+            .container()
+            .git_branch_from_workspace(&attempt_id, &task.title)
+            .await
+    };
+
+    // Compute agent_working_dir
+    let agent_working_dir = if is_directory_only {
+        None
+    } else if repos.len() == 1 {
+        match &repos[0].default_working_dir {
+            Some(subdir) => {
+                let path = PathBuf::from(&repos[0].name).join(subdir);
+                Some(path.to_string_lossy().to_string())
+            }
+            None => Some(repos[0].name.clone()),
+        }
+    } else {
+        None
+    };
+
+    let workspace = Workspace::create(
+        pool,
+        &CreateWorkspace {
+            branch: git_branch_name,
+            agent_working_dir,
+        },
+        attempt_id,
+        task.id,
+    )
+    .await?;
+
+    // Create workspace repos with default target branches
+    if !is_directory_only {
+        let workspace_repos: Vec<CreateWorkspaceRepo> = repos
+            .iter()
+            .map(|r| CreateWorkspaceRepo {
+                repo_id: r.id,
+                target_branch: r
+                    .default_target_branch
+                    .clone()
+                    .unwrap_or_else(|| "main".to_string()),
+            })
+            .collect();
+        WorkspaceRepo::create_many(pool, workspace.id, &workspace_repos).await?;
+    }
+
+    // Start the workspace
+    if let Err(err) = deployment
+        .container()
+        .start_workspace(&workspace, executor_profile_id.clone())
+        .await
+    {
+        tracing::error!("Auto-run: failed to start workspace for task {}: {}", task.id, err);
+    }
+
+    deployment
+        .track_if_analytics_allowed(
+            "task_attempt_auto_started",
+            serde_json::json!({
+                "task_id": task.id.to_string(),
+                "project_id": task.project_id.to_string(),
+                "executor": &executor_profile_id.executor,
+                "workspace_id": workspace.id.to_string(),
+                "auto_run": true,
+            }),
+        )
+        .await;
+
+    tracing::info!("Auto-run: created attempt for task {}", task.id);
+    Ok(())
+}
+
+/// Resolve the executor profile for auto-run by looking at the last session
+/// used on any task in the project, falling back to ClaudeCode.
+async fn resolve_auto_run_executor(
+    pool: &sqlx::SqlitePool,
+    project_id: Uuid,
+) -> ExecutorProfileId {
+    let last_executor: Option<String> = sqlx::query_scalar(
+        r#"SELECT s.executor
+           FROM sessions s
+           JOIN workspaces w ON w.id = s.workspace_id
+           JOIN tasks t ON t.id = w.task_id
+           WHERE t.project_id = $1
+           ORDER BY s.created_at DESC
+           LIMIT 1"#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some(executor_str) = last_executor {
+        if let Ok(agent) = executor_str.parse::<BaseCodingAgent>() {
+            return ExecutorProfileId::new(agent);
+        }
+    }
+
+    ExecutorProfileId::new(BaseCodingAgent::ClaudeCode)
 }
 
 pub async fn delete_task(

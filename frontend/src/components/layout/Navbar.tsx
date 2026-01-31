@@ -31,6 +31,7 @@ import { useProjectRepos } from '@/hooks';
 import { useDiscordOnlineCount } from '@/hooks/useDiscordOnlineCount';
 import { useTranslation } from 'react-i18next';
 import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
 import {
   Tooltip,
   TooltipContent,
@@ -39,7 +40,7 @@ import {
 } from '@/components/ui/tooltip';
 import { OAuthDialog } from '@/components/dialogs/global/OAuthDialog';
 import { useUserSystem } from '@/components/ConfigProvider';
-import { oauthApi } from '@/lib/api';
+import { oauthApi, projectsApi } from '@/lib/api';
 
 const INTERNAL_NAV = [{ label: 'Projects', icon: FolderOpen, to: '/projects' }];
 
@@ -114,6 +115,18 @@ export function Navbar() {
       openTaskForm({ mode: 'create', projectId });
     }
   };
+
+  const handleAutoRunToggle = useCallback(
+    async (checked: boolean) => {
+      if (!projectId) return;
+      try {
+        await projectsApi.update(projectId, { auto_run: checked });
+      } catch (err) {
+        console.error('Failed to update auto_run:', err);
+      }
+    },
+    [projectId]
+  );
 
   const handleOpenInIDE = () => {
     handleOpenInEditor();
@@ -206,6 +219,36 @@ export function Navbar() {
                     </Tooltip>
                   </TooltipProvider>
                 </div>
+                <NavDivider />
+              </>
+            ) : null}
+
+            {isTasksRoute && projectId && project ? (
+              <>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="flex items-center gap-1.5">
+                        <Switch
+                          id="auto-run"
+                          checked={project.auto_run ?? false}
+                          onCheckedChange={handleAutoRunToggle}
+                          aria-label="Auto run"
+                        />
+                        <Label
+                          htmlFor="auto-run"
+                          className="text-xs text-muted-foreground cursor-pointer select-none"
+                        >
+                          Auto run
+                        </Label>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">
+                      Automatically start an attempt when a task moves to In
+                      Progress
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 <NavDivider />
               </>
             ) : null}

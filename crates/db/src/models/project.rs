@@ -24,6 +24,7 @@ pub struct Project {
     pub default_agent_working_dir: Option<String>,
     pub remote_project_id: Option<Uuid>,
     pub working_directory: Option<String>,
+    pub auto_run: bool,
     #[ts(type = "Date")]
     pub created_at: DateTime<Utc>,
     #[ts(type = "Date")]
@@ -39,7 +40,10 @@ pub struct CreateProject {
 
 #[derive(Debug, Deserialize, TS)]
 pub struct UpdateProject {
+    #[ts(optional)]
     pub name: Option<String>,
+    #[ts(optional)]
+    pub auto_run: Option<bool>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -79,6 +83,7 @@ impl Project {
                       default_agent_working_dir,
                       remote_project_id as "remote_project_id: Uuid",
                       working_directory,
+                      auto_run as "auto_run!: bool",
                       created_at as "created_at!: DateTime<Utc>",
                       updated_at as "updated_at!: DateTime<Utc>"
                FROM projects
@@ -97,6 +102,7 @@ impl Project {
                    p.default_agent_working_dir,
                    p.remote_project_id as "remote_project_id: Uuid",
                    p.working_directory,
+                   p.auto_run as "auto_run!: bool",
                    p.created_at as "created_at!: DateTime<Utc>", p.updated_at as "updated_at!: DateTime<Utc>"
             FROM projects p
             WHERE p.id IN (
@@ -121,6 +127,7 @@ impl Project {
                       default_agent_working_dir,
                       remote_project_id as "remote_project_id: Uuid",
                       working_directory,
+                      auto_run as "auto_run!: bool",
                       created_at as "created_at!: DateTime<Utc>",
                       updated_at as "updated_at!: DateTime<Utc>"
                FROM projects
@@ -139,6 +146,7 @@ impl Project {
                       default_agent_working_dir,
                       remote_project_id as "remote_project_id: Uuid",
                       working_directory,
+                      auto_run as "auto_run!: bool",
                       created_at as "created_at!: DateTime<Utc>",
                       updated_at as "updated_at!: DateTime<Utc>"
                FROM projects
@@ -160,6 +168,7 @@ impl Project {
                       default_agent_working_dir,
                       remote_project_id as "remote_project_id: Uuid",
                       working_directory,
+                      auto_run as "auto_run!: bool",
                       created_at as "created_at!: DateTime<Utc>",
                       updated_at as "updated_at!: DateTime<Utc>"
                FROM projects
@@ -190,6 +199,7 @@ impl Project {
                           default_agent_working_dir,
                           remote_project_id as "remote_project_id: Uuid",
                           working_directory,
+                          auto_run as "auto_run!: bool",
                           created_at as "created_at!: DateTime<Utc>",
                           updated_at as "updated_at!: DateTime<Utc>""#,
             project_id,
@@ -210,21 +220,24 @@ impl Project {
             .ok_or(sqlx::Error::RowNotFound)?;
 
         let name = payload.name.clone().unwrap_or(existing.name);
+        let auto_run = payload.auto_run.unwrap_or(existing.auto_run);
 
         sqlx::query_as!(
             Project,
             r#"UPDATE projects
-               SET name = $2
+               SET name = $2, auto_run = $3
                WHERE id = $1
                RETURNING id as "id!: Uuid",
                          name,
                          default_agent_working_dir,
                          remote_project_id as "remote_project_id: Uuid",
                          working_directory,
+                         auto_run as "auto_run!: bool",
                          created_at as "created_at!: DateTime<Utc>",
                          updated_at as "updated_at!: DateTime<Utc>""#,
             id,
             name,
+            auto_run,
         )
         .fetch_one(pool)
         .await
@@ -290,6 +303,7 @@ mod tests {
             default_agent_working_dir: None,
             remote_project_id: None,
             working_directory,
+            auto_run: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
